@@ -7,12 +7,33 @@ import numpy as np
 import asyncio
 import websockets
 import json
+import requests
+
+from flask import Flask, render_template, Response, jsonify, request
+from flask_socketio import SocketIO, emit
+
+
+# Initialize Flask app and SocketIO
+app = Flask(__name__)
+socketio = SocketIO(app)
+
+
+alert_number = 0
+t_count = 0 
+
+
+@app.route("/")
+def index():
+    """Render the main page."""
+    return render_template("index.html", number= alert_number)
 
 #the model from ultralytics
 model=YOLO('yolov8s.pt')
 
 # Initialize WebSocket clients
 connected_clients = set()
+
+
 #mouse event to display coordinates
 def RGB(event, x, y, flags, param):
     if event == cv2.EVENT_MOUSEMOVE :  
@@ -21,21 +42,23 @@ def RGB(event, x, y, flags, param):
   
         
 
-cv2.namedWindow('RGB')
-cv2.setMouseCallback('RGB', RGB)
-esp32_url = "http://192.168.1.177"
+#cv2.namedWindow('RGB')
+#cv2.setMouseCallback('RGB', RGB)
+esp32_url = "http://172.20.10.4" 
+
+mkr1000_ip = "http://192.168.1.150:5000"  
+
 # Open a connection to the video stream
-#cap = cv2.VideoCapture('video/p.mp4')
-cap = cv2.VideoCapture(esp32_url)
-my_file = open("coco.txt", "r")
-data = my_file.read()
-class_list = data.split("\n") 
+cap = cv2.VideoCapture('video/p.mp4')
+#cap = cv2.VideoCapture(esp32_url)
+
 #print(class_list)
 
 count=0
+
 tracker= Tracker() # calling tracker class
 
-#coordintes of area to count
+#coordintes of area to count -----------------------------these are to be updated for room exit/entry
 area1=[(494,289),(505,499),(578,496),(530,292)]
 area2=[(548,290),(600,496),(637,493),(574,288)]
 
@@ -43,28 +66,30 @@ going_out= {}
 going_in= {}
 counter1= []
 counter2= []
-async def generate_and_send_frames(websocket):
+
+#--------------------------------------------------------------Main logic here
+def generate_frames():
+    warning_sent = False  # Initialize locally
+    global t_count
     while True:    
         ret,frame = cap.read()
         if not ret:
             break
 
 
-    #    count += 1
-    #    if count % 3 != 0:
-    #        continue
         frame=cv2.resize(frame,(1020,500))
     
 
-        results=model.predict(frame)
-    #   print(results)
+        results=model.predict(frame, classes=[0], conf=0.4, iou=0.6)
+
         a=results[0].boxes.data
+                
         px=pd.DataFrame(a).astype("float")
-    #    print(px)
+
         
         list= []
         for index,row in px.iterrows():
-    #        print(row)
+
             #referencing the coordinates of rectangle
             x1=int(row[0])
             y1=int(row[1])
@@ -72,9 +97,8 @@ async def generate_and_send_frames(websocket):
             y2=int(row[3])
             d=int(row[5])
             
-            c=class_list[d]
-            if 'person' in c:
-                list.append([x1, y1, x2, y2])
+
+            list.append([x1, y1, x2, y2])
         bbox_idx= tracker.update(list)
         for bbox in bbox_idx:
             x3,y3,x4,y4,id=bbox
@@ -105,37 +129,84 @@ async def generate_and_send_frames(websocket):
                         counter2.append(id)
             
 
-    #two areas for direction of movement
+    
         out_c= len(counter1)
         in_c= len(counter2)
+        t_count= in_c- out_c
+        
+        # Check if t_count equals alert_number
+        if t_count == alert_number:
+            print(f"Warning: t_count ({t_count}) reached alert_number ({alert_number})")
+            socketio.emit('warning', {'message': f"Warning: Limit of People in Room Reached> {alert_number}"})
+            warning_sent = True
+        elif t_count != alert_number and warning_sent:
+            print(f"Clearing Warning: ({t_count}) no longer equals alert_number ({alert_number})")
+            socketio.emit('clear_warning', {})
+            warning_sent = False
 
-                # Send the counters to WebSocket clients
-        try:
-            await websocket.send(json.dumps({"out_c": out_c, "in_c": in_c}))
-        except websockets.exceptions.ConnectionClosed:
-            print("WebSocket connection closed")
-            break
+        # Encode frame for streaming
+        _, buffer = cv2.imencode('.jpg', frame)
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-'''    
-    cvzone.putTextRect(frame, f'OUT_C: {out_c}', (50, 60), 2,2) 
-    cvzone.putTextRect(frame, f'in_C: {in_c}', (50, 160), 2,2) 
-    cv2.polylines(frame, [np.array(area1, np.int32)], True, (0, 255, 0), 1) #drawing lines of area of interest
-    cv2.polylines(frame, [np.array(area2, np.int32)], True, (0, 255, 0), 1) #drawing lines of area of interest
-    cv2.imshow("RGB", frame)
-    if cv2.waitKey(1)&0xFF==27:
-        break
-cap.release()
-cv2.destroyAllWindows()'''
+#--------------------Communication section ------------------------------------------------------------------------
 
-# Handle WebSocket connections
-async def handle_connection(websocket, path):
-    connected_clients.add(websocket)
+
+
+def send_counts_to_mkr(t_count):
+    data = {
+        "t_count": t_count,
+        
+    }
+    
     try:
-        await generate_and_send_frames(websocket)
-    finally:
-        connected_clients.remove(websocket)
+        response = requests.post(
+                mkr1000_ip,  # MKR1000 IP
+                json=data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Connection": "close"  # Ensure connection is closed after request
+                },
+                timeout=10  # Set a longer timeout
+            )
+        print(f"Sent counts to MKR1000: {data}, Response: {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to send counts to MKR1000: {e}")
+        return False
+    return True
 
-# Start WebSocket server
-start_server = websockets.serve(handle_connection, "0.0.0.0", 8765)
-asyncio.get_event_loop().run_until_complete(start_server)
-asyncio.get_event_loop().run_forever()
+# Update Flask WebSocket event to include the call
+@socketio.on('request_update')
+def handle_request_update():
+    
+
+    emit('update_counters', {'t_count': t_count})
+    if not send_counts_to_mkr(t_count):
+        print("Skipping further actions as MKR1000 POST failed.")
+    
+
+@app.route("/video_feed")
+def video_feed():
+    """Video feed route."""
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route("/update_number", methods=["POST"])
+def update_number():
+    """Update the number based on user interaction."""
+    global alert_number
+    data = request.get_json()
+    print('from web', data)
+    change = data.get("change", 0)
+    alert_number += change
+    print({"number": alert_number})
+    return jsonify({"number": alert_number})
+
+@socketio.on('connect')
+def handle_connect():
+    """Handle client connection."""
+    emit('update_counters', {'t_count': t_count})
+    print('connect',t_count)
+
+if __name__ == "__main__":
+    socketio.run(app, host="0.0.0.0", port=5000)
