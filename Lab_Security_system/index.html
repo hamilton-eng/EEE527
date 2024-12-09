@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Person Counter</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+
+</head>
+<body>
+    <!-- Counter Section -->
+    <h1>Lab Monitor</h1>
+    <div>
+        <h3>Video Feed</h3>
+        <img src="/video_feed" style="width: 100%; max-width: 800px;" />
+    </div>
+    <div>
+        <h3>Counts</h3>
+        <p>People in The Room: <span id="t_count">0</span></p>
+        <div id="warning" style="display: none; color: red; font-weight: bold;">
+            <!-- Warning message will appear here -->
+        </div>
+        
+    </div>
+    <!-- Adjustable Number Section -->
+    <div>
+        <h3>Alert Number of People</h3>
+        <button id="decrement">-</button>
+        <span id="current-number">0</span>
+        <button id="increment">+</button>
+        <p>Max Amount of People in the Room:</p><span id="current-number">0</span>
+    </div>
+    <script>
+        const socket = io();
+        let alertNumber = 0; // Initialize alert number variable
+
+        // Update counters in real-time
+        socket.on('update_counters', data => {
+            document.getElementById('t_count').textContent = data.t_count;
+            
+        });
+
+        // Request updates periodically
+        setInterval(() => {
+            socket.emit('request_update');
+        }, 1000);
+        
+           // Function to update the displayed alert number
+        function updateAlertDisplay(newAlertNumber) {
+            document.getElementById("current-number").textContent = newAlertNumber;
+        }
+            // Listen for warning events
+        socket.on('warning', data => {
+            if (data && data.message) {
+                console.log("Warning received:", data.message);
+
+                // Display warning on the webpage
+                const warningDiv = document.getElementById('warning');
+                warningDiv.textContent = data.message;
+                warningDiv.style.display = 'block'; // Show the warning
+            }
+        });
+                // Listen for clear_warning events
+        socket.on('clear_warning', () => {
+            console.log("Clear warning received");
+
+            // Hide the warning from the webpage
+            const warningDiv = document.getElementById('warning');
+            warningDiv.style.display = 'none';
+        });
+
+        // Function to send alert number updates to the backend
+        function sendAlertNumberUpdate(change) {
+            $.ajax({
+                url: "/update_number", // Flask backend endpoint
+                type: "POST",
+                contentType: "application/json",
+                data: JSON.stringify({ change: change }),
+                success: function(response) {
+                    console.log('update number', response.number)
+                    // Update the displayed number with the response from the backend
+                    if (response && response.number !== undefined) {
+                        updateAlertDisplay(response.number);
+                        console.log('updated is number', response.number)
+                    } else {
+                        console.error("Invalid response from server:", response);
+                    }
+                },
+                error: function() {
+                    alert("Failed to update alert number on the server.");
+                }
+            });
+        }
+
+        // Increment and decrement buttons
+        document.getElementById("increment").addEventListener("click", () => {
+            sendAlertNumberUpdate(1); // Increment by 1
+        });
+
+        document.getElementById("decrement").addEventListener("click", () => {
+            sendAlertNumberUpdate(-1); // Decrement by 1
+        });
+
+        $(document).ready(() => {
+
+            console.log('DOM is fully loaded');
+
+            $.ajax({
+                url: "/update_number",
+                type: "POST",
+                contentType: "application/json",
+                data: JSON.stringify({ change: 0 }), // Fetch the current value
+                success: function (response) {
+                    console.log('Initial response from server:', response);
+                    if (response && response.number !== undefined) {
+                        updateAlertDisplay(response.number);
+                    }
+                },
+                error: function () {
+                    console.error("Failed to fetch the initial alert number.");
+                }
+            });
+        });
+    </script>
+</body>
+</html>
